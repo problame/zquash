@@ -112,7 +112,6 @@ impl<D: Clone + Default + fmt::Debug> Knowledge<D> {
                 }
             }
         }
-
     }
 }
 
@@ -250,7 +249,6 @@ where
         out.push_back(dbg!(winner).clone());
 
         Some(())
-
     }
 
     fn repeat_find_action(&mut self, out: &mut VecDeque<Knowledge<D>>) {
@@ -452,5 +450,4 @@ mod helper_tests {
             ]
         );
     }
-
 }

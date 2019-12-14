@@ -265,7 +265,6 @@ impl<T: fmt::Debug> SplitTree<T> {
             .last()
             .expect("always at least one split")
     }
-
 }
 
 #[cfg(test)]

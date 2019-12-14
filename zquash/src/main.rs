@@ -37,9 +37,12 @@ enum Command {
         b_to_c: String,
         target: String,
     },
-    write {
+    dump {
         stream: String,
         target: Option<PathBuf>,
+    },
+    show {
+        stream: String,
     },
 }
 
@@ -84,7 +87,7 @@ fn main() -> CliResult {
             let cfg = lsm::LSMSrvConfig { root_dir: root };
             unsafe { lsm::merge_streams(&cfg, &[a_to_b.as_ref(), b_to_c.as_ref()], target)? };
         }
-        Command::write { stream, target } => {
+        Command::dump { stream, target } => {
             dotenv::dotenv().ok();
 
             let root: PathBuf = std::env::var("ZS_LSM_ROOT")
@@ -92,15 +95,26 @@ fn main() -> CliResult {
                 .into();
 
             let mut target: Box<dyn io::Write> = match target {
-                Some(p) => {
-                    Box::new(File::create(p.clone()).context(format!("create output file {:?}", p))?)
-                }
+                Some(p) => Box::new(
+                    File::create(p.clone()).context(format!("create output file {:?}", p))?,
+                ),
                 None => Box::new(std::io::stdout()),
             };
 
             let cfg = lsm::LSMSrvConfig { root_dir: root };
 
             unsafe { lsm::write_stream(&cfg, stream, &mut target) }?;
+        }
+        Command::show { stream } => {
+            dotenv::dotenv().ok();
+
+            let root: PathBuf = std::env::var("ZS_LSM_ROOT")
+                .context("ZS_LSM_ROOT not set")?
+                .into();
+
+            let cfg = lsm::LSMSrvConfig { root_dir: root };
+
+            unsafe { lsm::show(&cfg, &stream) };
         }
     }
 

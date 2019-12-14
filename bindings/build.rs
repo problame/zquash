@@ -8,7 +8,12 @@ fn main() {
     let helpers = Path::new(&dir).join("./helpers");
 
     // compile helpers lib
-    cc::Build::new().file(helpers.join("helpers.c")).flag("-Werror").flag("-Wall").flag("-Wpedantic").compile("helpers");
+    cc::Build::new()
+        .file(helpers.join("helpers.c"))
+        .flag("-Werror")
+        .flag("-Wall")
+        .flag("-Wpedantic")
+        .compile("helpers");
 
     let clang_args = [format!("-I{}", helpers.display())];
     let bindings = bindgen::Builder::default()

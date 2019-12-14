@@ -1,5 +1,3 @@
-
-
 extern crate bincode;
 extern crate serde;
 
@@ -231,9 +229,7 @@ pub struct SortedLSMWriter<K: Ord, V> {
 }
 
 impl<K: Ord + Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> SortedLSMWriter<K, V> {
-    pub fn new(
-        path: &std::path::Path
-    ) -> SortedLSMWriter<K, V> {
+    pub fn new(path: &std::path::Path) -> SortedLSMWriter<K, V> {
         SortedLSMWriter {
             file: std::io::BufWriter::new(std::fs::File::create(path).unwrap()),
             last_entry: None,
@@ -280,5 +276,3 @@ mod tests {
         std::fs::remove_file(&pathout);
     }
 }
-
-

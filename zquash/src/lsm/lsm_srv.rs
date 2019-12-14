@@ -155,26 +155,23 @@ impl Iterator for ObjectRangeIter {
 
         let mut stream = self.stream.borrow_mut();
         let (end_record, _) = stream.peek().unwrap();
-        if end_record.drr_type == dmu_replay_record_DRR_END {
+        assert!(
+            ObjectsWithinObjectRangeIterator::is_follow(&end_record),
+            "{:?}",
+            drr_debug(end_record)
+        );
+        assert!(
+            !ObjectsWithinObjectRangeIterator::should_consume(end_record),
+            "{:?}",
+            drr_debug(end_record)
+        );
+        if Self::is_follow(end_record) {
             return None;
         }
-        if end_record.drr_type == dmu_replay_record_DRR_FREEOBJECTS
-            && unsafe {
-                end_record.drr_u.drr_freeobjects.drr_firstobj > 0
-                    && end_record.drr_u.drr_freeobjects.drr_numobjs == 0
-            }
-        {
-            // the trailing FREEOBJECTS record
-            return None;
-        }
+        // INVARIANT: all follows of ObjectsWithinObjectRangeIterator::is_follow covered
 
         let (or_record, payload) = stream.next().expect("expecting a record");
-        assert_eq!(
-            or_record.drr_type,
-            dmu_replay_record_DRR_OBJECT_RANGE,
-            "{:?}",
-            drr_debug(or_record)
-        );
+
         use itertools::Itertools;
         let object_range_drr = RecordWithPayload {
             drr: or_record,
@@ -240,7 +237,7 @@ impl Iterator for ObjectsWithinObjectRangeIterator {
         }
 
         assert!(
-            self.should_consume(next_record)
+            Self::should_consume(next_record)
 
             " unexpected record type {:?}",
             drr_debug(next_record)
@@ -261,6 +258,22 @@ impl Iterator for ObjectsWithinObjectRangeIterator {
     }
 }
 
+impl ObjectRangeIter {
+    fn is_follow(drr: &dmu_replay_record) -> bool {
+        // END RECORD
+        if drr.drr_type == dmu_replay_record_DRR_END {
+            return true;
+        }
+
+        // Trailing FREEOBJECTS
+        if LSMKey::is_trailing_freeobjects(drr) {
+            return true;
+        }
+
+        return false;
+    }
+}
+
 impl ObjectsWithinObjectRangeIterator {
     // returns `true` iff drr is a follow-element of an object range stream,
     // i.e. the a stream element not consumed by this iterator
@@ -270,20 +283,15 @@ impl ObjectsWithinObjectRangeIterator {
             return true;
         }
 
-        // Trailing FREEOBJECTS is not preceded by OBJECT_RANGE
-        if drr.drr_type == dmu_replay_record_DRR_FREEOBJECTS
-            && unsafe {
-                drr.drr_u.drr_freeobjects.drr_firstobj > 0
-                    && drr.drr_u.drr_freeobjects.drr_numobjs == 0
-            }
-        {
+        // we are nested within ObjectRangeIter
+        if ObjectRangeIter::is_follow(drr) {
             return true;
         }
 
         return false;
     }
 
-    fn should_consume(&self, drr: &dmu_replay_record) -> bool {
+    fn should_consume(drr: &dmu_replay_record) -> bool {
         if drr.drr_type == dmu_replay_record_DRR_WRITE || drr.drr_type == dmu_replay_record_DRR_FREE
         {
             let _obj_id = unsafe { LSMKey(*drr).lower_obj_id() }.unwrap();
@@ -303,7 +311,7 @@ impl ObjectsWithinObjectRangeIterator {
                     None
                 } else {
                     assert!(
-                        self.should_consume(drr)
+                        Self::should_consume(drr)
                         " unexpected record type {:?}",
                         drr_debug(drr)
                     ); // FIXME
@@ -406,6 +414,16 @@ unsafe fn symbolic_dump_consume_lsm_reader(
     }
 }
 
+pub unsafe fn show(config: &LSMSrvConfig, loaded_stream: &str) {
+    let mut r = lsm::LSMReader::<LSMKey, Vec<u8>>::open(&sorted_stream_path(
+        config,
+        (*loaded_stream).to_owned(),
+    ));
+    for (k, _) in r {
+        println!("{:?}", drr_debug(&k.0));
+    }
+}
+
 pub unsafe fn merge_streams(
     config: &LSMSrvConfig,
     streams_newest_to_oldest: &[&str],
@@ -442,14 +460,36 @@ pub unsafe fn merge_streams(
     let begin = begins_oldest_to_newest.pop_front().unwrap();
     let begin = begins_oldest_to_newest.into_iter().fold(begin, |mut b, r| {
         unsafe {
+            use const_cstr::const_cstr;
             assert_eq!(r.drr.drr_type, dmu_replay_record_DRR_BEGIN);
             assert_eq!(
                 dbg!(&b).drr.drr_u.drr_begin.drr_toguid,
                 dbg!(&r).drr.drr_u.drr_begin.drr_fromguid
             ); // TODO error
             let fromguid = b.drr.drr_u.drr_begin.drr_fromguid;
+            let from_ivset_guid = {
+                let mut from_ivset_guid: u64 = 0;
+                b.drr_begin_mutate_crypt_keydata(&mut |crypt_keydata| -> Result<(), ()> {
+                    nvpair_sys::nvlist_lookup_uint64(
+                        crypt_keydata,
+                        const_cstr!("from_ivset_guid").as_ptr(),
+                        &mut from_ivset_guid,
+                    );
+                    Err(()) // abort mutation
+                });
+                from_ivset_guid
+            };
             b = r;
             b.drr.drr_u.drr_begin.drr_fromguid = fromguid;
+            b.drr_begin_mutate_crypt_keydata(&mut |crypt_keydata| -> Result<(), ()> {
+                nvpair_sys::nvlist_add_uint64(
+                    crypt_keydata,
+                    const_cstr!("from_ivset_guid").as_ptr(),
+                    from_ivset_guid,
+                );
+                Ok(())
+            })
+            .expect("mutate ivset guid");
             b
         }
     });
@@ -682,6 +722,7 @@ pub unsafe fn merge_streams(
                             };
                             r
                         };
+                        dbg!(drr_debug(&free));
                         target.insert(LSMKey(free), Vec::new());
                     }
                     End => panic!("merger emitted End record, unsupported"),
@@ -749,6 +790,7 @@ use serde::{Deserialize, Serialize, Serializer};
 ///   FREEOBJECTS, OBJECT by object_id
 ///   FREE, WRITE by (object_id, offset_in_object)
 /// FREEOBJECTS (firstobj=X, numobjs=0)
+/// FREEOBJECTS (firstobj=X, numobjs=u64max-X)
 /// END
 #[derive(Serialize, Deserialize)]
 struct LSMKey(dmu_replay_record);
@@ -796,6 +838,25 @@ impl LSMKey {
             dmu_replay_record_DRR_FREE => Some(u.drr_free.drr_length),
             _ => unimplemented!(), // TODO
         }
+    }
+
+    fn is_trailing_freeobjects(drr: &dmu_replay_record) -> bool {
+        if !drr.drr_type == dmu_replay_record_DRR_FREEOBJECTS {
+            return false;
+        }
+        unsafe {
+            let (firstobj, numobjs) = unsafe {
+                let fos = drr.drr_u.drr_freeobjects;
+                (fos.drr_firstobj, fos.drr_numobjs)
+            };
+            if firstobj == 0 && numobjs == 0 {
+                return true;
+            }
+            if numobjs == std::u64::MAX - firstobj {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
@@ -854,43 +915,39 @@ impl Ord for LSMKey {
             }
 
             // handle all special cases that do not fit into OBJECT_RANGE
-            // 1. FREEOBJECTS(firstobj=0, numobjs=0)
-            {
-                let is_freeobjects_0_0 = |drr: &dmu_replay_record| {
-                    if drr.drr_type == dmu_replay_record_DRR_FREEOBJECTS
-                        && unsafe {
-                            drr.drr_u.drr_freeobjects.drr_firstobj == 0
-                                && drr.drr_u.drr_freeobjects.drr_numobjs == 0
+            let order_for_records_after_last_object_range_and_its_frees_and_writes =
+                |drr: &dmu_replay_record| {
+                    if drr.drr_type == dmu_replay_record_DRR_FREEOBJECTS {
+                        let (firstobj, numobj) = {
+                            let fos = drr.drr_u.drr_freeobjects;
+                            (fos.drr_firstobj, fos.drr_numobjs)
+                        };
+                        // FREEOBJECTS(firstobj=X, numobjs=0)
+                        //  <
+                        // FREEOBJECTS (firstobj=X, numobjs=u64max-X)
+                        if (numobj == 0) {
+                            (1, 0)
+                        } else if (numobj == std::u64::MAX - firstobj) {
+                            (1, numobj)
+                        } else {
+                            (0, 0) // indeterminate
                         }
-                    {
-                        0
+                    } else if drr.drr_type == dmu_replay_record_DRR_END {
+                        (2, 0)
                     } else {
-                        1
+                        (0, 0) // indeterminate
                     }
                 };
-                if is_freeobjects_0_0(&self.0).cmp(&is_freeobjects_0_0(&o.0)) != Ordering::Equal {
-                    return is_freeobjects_0_0(&self.0).cmp(&is_freeobjects_0_0(&o.0));
-                } else if is_freeobjects_0_0(&self.0) == 0 {
-                    return Ordering::Equal;
-                }
-            }
-            // 1. FREEOBJECTS(firstobj=X, numobjs=0)
             {
-                let is_freeobjects_x_0 = |drr: &dmu_replay_record| {
-                    if drr.drr_type == dmu_replay_record_DRR_FREEOBJECTS
-                        && unsafe { drr.drr_u.drr_freeobjects.drr_numobjs == 0 }
-                    {
-                        let fo = drr.drr_u.drr_freeobjects.drr_firstobj;
-                        assert!(fo > 0); // see below
-                        fo
-                    } else {
-                        assert_ne!(drr.drr_type, dmu_replay_record_DRR_END);
-                        // all other records lower than FREEOBJECTS(firstobj=X, numobjs=0)
-                        0
-                    }
-                };
-                if is_freeobjects_x_0(&self.0).cmp(&is_freeobjects_x_0(&o.0)) != Ordering::Equal {
-                    return is_freeobjects_x_0(&self.0).cmp(&is_freeobjects_x_0(&o.0));
+                let cmp =
+                    order_for_records_after_last_object_range_and_its_frees_and_writes(&self.0)
+                        .cmp(
+                            &order_for_records_after_last_object_range_and_its_frees_and_writes(
+                                &o.0,
+                            ),
+                        );
+                if cmp != Ordering::Equal {
+                    return cmp;
                 }
             }
 

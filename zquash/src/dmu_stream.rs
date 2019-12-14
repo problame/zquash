@@ -47,7 +47,6 @@ impl ReplayRecordExt for dmu_replay_record {
     }
 }
 
-
 #[derive(Clone)]
 pub struct RecordWithPayload {
     pub drr: dmu_replay_record,
@@ -61,6 +60,79 @@ impl fmt::Debug for RecordWithPayload {
         f.debug_struct("RecordWithPayload")
             .field("drr", &drr_debug(&self.drr))
             .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum DrrBeginMutateNvlistError<E: std::fmt::Debug> {
+    DecodeOuterNvlist,
+    LookupCryptKeydata,
+    MutationCallbackError(E),
+    PackingFailedMutationNotCommitted,
+}
+
+impl RecordWithPayload {
+    pub unsafe fn drr_begin_mutate_crypt_keydata<O, E: std::fmt::Debug, F>(
+        &mut self,
+        cb: F,
+    ) -> Result<O, DrrBeginMutateNvlistError<E>>
+    where
+        F: FnOnce(*mut nvpair_sys::nvlist_t) -> Result<O, E>,
+    {
+        assert_eq!(self.drr.drr_type, dmu_replay_record_DRR_BEGIN);
+
+        use const_cstr::const_cstr;
+        let buf = self.payload.as_mut_ptr();
+        let mut deser: *mut nvpair_sys::nvlist_t = std::ptr::null_mut();
+        if nvpair_sys::nvlist_unpack(buf as *mut i8, self.payload.len(), &mut deser, 0) != 0 {
+            return Err(DrrBeginMutateNvlistError::DecodeOuterNvlist);
+        }
+
+        let mut crypt_keydata: *mut nvpair_sys::nvlist_t = std::ptr::null_mut();
+        if nvpair_sys::nvlist_lookup_nvlist(
+            deser,
+            const_cstr!("crypt_keydata").as_ptr(),
+            &mut crypt_keydata,
+        ) != 0
+        {
+            nvpair_sys::nvlist_free(deser);
+            return Err(DrrBeginMutateNvlistError::LookupCryptKeydata);
+        }
+
+        let cbres = cb(crypt_keydata);
+
+        if cbres.is_ok() {
+            // commit mutations by replacing self.payload with updated one
+            let mut packed_allocated_buf: *mut i8 = std::ptr::null_mut();
+            let mut packed_allocated_buf_size: usize = 0;
+            if nvpair_sys::nvlist_pack(
+                deser,
+                &mut packed_allocated_buf,
+                &mut packed_allocated_buf_size,
+                nvpair_sys::NV_ENCODE_NATIVE,
+                0,
+            ) != 0
+            {
+                nvpair_sys::nvlist_free(deser);
+                return Err(DrrBeginMutateNvlistError::PackingFailedMutationNotCommitted);
+            }
+            let buf_as_slice = std::slice::from_raw_parts(
+                packed_allocated_buf as *const u8,
+                packed_allocated_buf_size,
+            );
+            assert_eq!(self.payload.len(), self.drr.drr_payloadlen as usize);
+            self.payload = Vec::from(buf_as_slice); // copy
+            use std::convert::TryInto;
+            self.drr.drr_payloadlen = packed_allocated_buf_size.try_into().unwrap();
+            libc::free(packed_allocated_buf as *mut std::ffi::c_void);
+        }
+
+        nvpair_sys::nvlist_free(deser);
+
+        match cbres {
+            Ok(o) => Ok(o),
+            Err(e) => Err(DrrBeginMutateNvlistError::MutationCallbackError(e)),
+        }
     }
 }
 

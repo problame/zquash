@@ -63,5 +63,4 @@ impl Fletcher4 {
     pub fn checksum(&self) -> [u64; 4] {
         [self.a, self.b, self.c, self.d]
     }
-
 }
