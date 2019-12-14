@@ -1,0 +1,13 @@
+[package]
+name = "bindings"
+version = "0.1.0"
+authors = ["Christian Schwarz <me@cschwarz.com>"]
+edition = "2018"
+build = "build.rs"
+
+[dependencies]
+serde = { version = "*", features = ["derive"] }
+
+[build-dependencies]
+bindgen = "0.52"
+cc = "~1"
